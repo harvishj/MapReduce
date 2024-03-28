@@ -1,34 +1,32 @@
 version: '3.7'
 services:
   master:
-    build:
-      context: ./master
+    build: ./master
     ports:
       - "5000:5000"
     networks:
       - mapreduce-network
+    command: "python master.py 5000"
 
   worker1:
-    build:
-      context: ./worker
+    build: ./worker
     environment:
-      - MASTER_HOST=master
-      - PORT=5000
-      - WORKER_NAME=worker1
-    command: python worker.py ${MASTER_HOST} ${PORT} ${WORKER_NAME}
+      MASTER_HOST: master
+      PORT: "5000"
+      WORKER_NAME: worker1
+    command: "python worker.py master 5000 worker1"
     depends_on:
       - master
     networks:
       - mapreduce-network
 
   worker2:
-    build:
-      context: ./worker
+    build: ./worker
     environment:
-      - MASTER_HOST=master
-      - PORT=5000
-      - WORKER_NAME=worker2
-    command: python worker.py ${MASTER_HOST} ${PORT} ${WORKER_NAME}
+      MASTER_HOST: master
+      PORT: "5000"
+      WORKER_NAME: worker2
+    command: "python worker.py master 5000 worker2"
     depends_on:
       - master
     networks:
