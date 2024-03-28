@@ -1,21 +1,23 @@
 import socket
 from threading import Thread, Lock
 import json
-import time
 import logging
+import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
 
 port = 5000
-active_workers = {}  # Dictionary to keep track of active workers and their addresses
-worker_lock = Lock()  # Lock for thread-safe operations on active_workers
-tasks = [{"id": 1, "type": "map", "data": "Hello World from MapReduce"}]
-task_status = {1: "pending"}
+active_workers = {}
+worker_lock = Lock()
+tasks = [{"id": 1, "type": "map", "data": "Hello World from MapReduce Hello MapReduce World"}]
+map_results = []
+reduce_tasks = []
+task_status = {task["id"]: "pending" for task in tasks}
 results = []
 
 def handle_worker(conn, addr):
-    global active_workers
+    global active_workers, map_results
     try:
         while True:
             data = conn.recv(1024)
@@ -27,15 +29,17 @@ def handle_worker(conn, addr):
                     worker_name = message['name']
                     active_workers[worker_name] = addr[0]
                     logging.info(f"Registered {worker_name} from {addr}")
-                    # If this is the first worker, start distributing tasks
                     if len(active_workers) == 1:
-                        Thread(target=distribute_tasks).start()
-            elif message['type'] == 'result':
-                # Process result
+                        Thread(target=distribute_map_tasks).start()
+            elif message['type'] == 'map_result':
+                map_results.extend(message['data'])
+                if len(map_results) == len(tasks):  # All map tasks have completed
+                    prepare_reduce_tasks()
+                    Thread(target=distribute_reduce_tasks).start()
+            elif message['type'] == 'reduce_result':
                 results.append(message['data'])
-                task_id = message['data']['task_id']
-                task_status[task_id] = "completed"
-                logging.info(f"Received result for task {task_id} from {addr}")
+                if len(results) == len(reduce_tasks):  # All reduce tasks have completed
+                    print_final_results()
     except Exception as e:
         logging.error(f"Error handling worker {addr}: {e}")
     finally:
@@ -46,6 +50,48 @@ def handle_worker(conn, addr):
                 logging.info(f"Worker {worker_name} disconnected.")
         conn.close()
 
+def distribute_map_tasks():
+    distribute_tasks(tasks, "map")
+
+def distribute_reduce_tasks():
+    distribute_tasks(reduce_tasks, "reduce")
+
+def distribute_tasks(tasks, task_type):
+    global active_workers
+    for task in tasks:
+        task_assigned = False
+        while not task_assigned:
+            with worker_lock:
+                for worker_name, worker_addr in active_workers.items():
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.connect((worker_addr, port))
+                            task_message = json.dumps({"type": task_type, "data": task})
+                            s.send(task_message.encode('utf-8'))
+                            task_assigned = True
+                            break
+                    except ConnectionError:
+                        logging.warning(f"Failed to connect to {worker_name}")
+            if not task_assigned:
+                time.sleep(1)
+
+def prepare_reduce_tasks():
+    global map_results, reduce_tasks
+    # Group map results by key
+    grouped_results = {}
+    for result in map_results:
+        for key, value in result.items():
+            if key in grouped_results:
+                grouped_results[key].append(value)
+            else:
+                grouped_results[key] = [value]
+    # Prepare reduce tasks
+    reduce_tasks = [{"id": i + 1, "data": {key: values}} for i, (key, values) in enumerate(grouped_results.items())]
+
+def print_final_results():
+    for result in results:
+        logging.info(f"Reduce result: {result}")
+
 def start_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', port))
@@ -55,31 +101,6 @@ def start_server():
         while True:
             conn, addr = s.accept()
             Thread(target=handle_worker, args=(conn, addr)).start()
-
-def distribute_tasks():
-    global active_workers, task_status
-    logging.info("Distributing tasks...")
-    while not all(status == "completed" for status in task_status.values()):
-
-        with worker_lock:
-
-            if active_workers:  # Proceed only if there are active workers
-                for task_id, status in task_status.items():
-                    if status == "pending":
-                        for worker_name, worker_addr in active_workers.items():
-                            try:
-                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                    s.connect((worker_addr, port))
-                                    task = next((task for task in tasks if task['id'] == task_id), None)
-                                    if task:
-                                        s.send(json.dumps(task).encode('utf-8'))
-                                        task_status[task_id] = f"assigned_to_{worker_name}"
-                                        print(f"Task {task_id} assigned to {worker_name}")
-                                        break
-                            except ConnectionError:
-                                logging.warning(f"Failed to connect to {worker_name}")
-                                continue
-            time.sleep(1)  # Wait a bit before trying to distribute tasks again
 
 if __name__ == "__main__":
     logging.info("Starting master server...")

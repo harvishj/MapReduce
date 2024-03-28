@@ -14,37 +14,64 @@ def handle_map_task(text):
     logging.info(f"Result: {result}")
     return result
 
+def handle_reduce_task(data):
+    # Assume data is in the format: {"key": [values]}
+    key, values = list(data.items())[0]
+    return {key: sum(values)}
+
 def main(master_host, port, worker_name):
-    connected = False
-    for _ in range(5):  # Retry up to 5 times
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((master_host, port))
-            connected = True
-            break  # Exit loop if connection is successful
-        except socket.error as err:
-            logging.warning(f"Connection attempt failed: {err}")
-            time.sleep(2)  # Wait for 2 seconds before retrying
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect((master_host, port))
+        logging.info(f"{worker_name} connected to master at {master_host}:{port}")
 
-    if not connected:
-        logging.error("Failed to connect to master after several attempts.")
-        sys.exit(1)
+        # Send registration message
+        register_msg = json.dumps({"type": "register", "name": worker_name})
+        s.sendall(register_msg.encode('utf-8'))
 
-    # Send registration message
-    register_msg = json.dumps({"type": "register", "name": worker_name})
-    s.sendall(register_msg.encode('utf-8'))
-    
-    while True:
-        data = s.recv(1024)
-        if not data:
-            break
-        task = json.loads(data)
-        if task['type'] == 'map':
-            result = handle_map_task(task['data'])
-            result_msg = json.dumps({"type": "result", "data": {"task_id": task['id'], "result": result}})
-            s.sendall(result_msg.encode('utf-8'))
-        elif task['type'] == 'terminate':
-            break
+        # Keep alive mechanism - optional
+        s.settimeout(10.0)  # Set a timeout for recv operation to prevent blocking indefinitely
+
+        while True:
+            try:
+                # Listen for tasks or commands from the master
+                logging.info("Waiting for tasks...")
+                data = s.recv(1024)
+                if not data:
+                    # If recv returns an empty bytes object, the connection has been closed
+                    logging.info("Master closed connection.")
+                    break
+            except socket.timeout:
+                # If recv times out, just try again
+                logging.error("Connection timed out. Retrying...")
+                continue
+            except Exception as e:
+                logging.error(f"An error occurred while receiving data: {e}")
+                break
+
+            message = json.loads(data.decode('utf-8'))
+
+            # Handle different types of tasks
+            logging.info(f"Received task: {message}")
+            if message['type'] == 'map':
+                result = handle_map_task(message['data'])
+                result_msg = json.dumps({"type": "map_result", "data": result})
+                s.sendall(result_msg.encode('utf-8'))
+            elif message['type'] == 'reduce':
+                result = handle_reduce_task(message['data'])
+                result_msg = json.dumps({"type": "reduce_result", "data": result})
+                s.sendall(result_msg.encode('utf-8'))
+            elif message['type'] == 'terminate':
+                logging.info("Received terminate command. Exiting.")
+                sys.exit(0)
+            else:
+                logging.error(f"Unknown task type: {message['type']}")
+                
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+    finally:
+        logging.info("Closing connection.")
+        s.close()
 
 if __name__ == "__main__":
     if len(sys.argv) == 4:
