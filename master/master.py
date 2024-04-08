@@ -69,7 +69,6 @@ def distribute_tasks(tasks, task_type):
                             task_message = json.dumps({"type": task_type, "data": task})
                             s.send(task_message.encode('utf-8'))
                             task_assigned = True
-                            break
                     except ConnectionError:
                         logging.warning(f"Failed to connect to {worker_name}")
             if not task_assigned:
@@ -89,8 +88,13 @@ def prepare_reduce_tasks():
     reduce_tasks = [{"id": i + 1, "data": {key: values}} for i, (key, values) in enumerate(grouped_results.items())]
 
 def print_final_results():
+    final_result = {}
     for result in results:
-        logging.info(f"Reduce result: {result}")
+        final_result.update(result)
+    logging.info("Final Reduce Results:")
+    for key, value in final_result.items():
+        logging.info(f"{key}: {value}")
+
 
 def start_server():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -99,8 +103,12 @@ def start_server():
         logging.info("Master listening...")
 
         while True:
-            conn, addr = s.accept()
-            Thread(target=handle_worker, args=(conn, addr)).start()
+            try:
+                conn, addr = s.accept()
+                Thread(target=handle_worker, args=(conn, addr)).start()
+            except Exception as e:
+                logging.error(f"Error accepting connection: {e}")
+                continue
 
 if __name__ == "__main__":
     logging.info("Starting master server...")

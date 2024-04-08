@@ -19,59 +19,60 @@ def handle_reduce_task(data):
     key, values = list(data.items())[0]
     return {key: sum(values)}
 
-def main(master_host, port, worker_name):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.connect((master_host, port))
-        logging.info(f"{worker_name} connected to master at {master_host}:{port}")
+def connect_to_master(master_host, port, retry_attempts=5, retry_interval=2):
+    for attempt in range(retry_attempts):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((master_host, port))
+            logging.info(f"Connected to master at {master_host}:{port}")
+            return sock
+        except ConnectionError as e:
+            logging.warning(f"Attempt {attempt + 1} failed to connect to master: {e}")
+            time.sleep(retry_interval)
+    logging.error("Could not connect to the master after several attempts.")
+    return None
 
+def main(master_host, port, worker_name):
+    sock = connect_to_master(master_host, port)
+    if not sock:
+        sys.exit(1)
+    
+    try:
         # Send registration message
         register_msg = json.dumps({"type": "register", "name": worker_name})
-        s.sendall(register_msg.encode('utf-8'))
-
-        # Keep alive mechanism - optional
-        s.settimeout(10.0)  # Set a timeout for recv operation to prevent blocking indefinitely
+        sock.sendall(register_msg.encode('utf-8'))
 
         while True:
             try:
-                # Listen for tasks or commands from the master
-                logging.info("Waiting for tasks...")
-                data = s.recv(1024)
+                data = sock.recv(1024)
                 if not data:
-                    # If recv returns an empty bytes object, the connection has been closed
-                    logging.info("Master closed connection.")
+                    logging.info("Connection closed by the master.")
                     break
-            except socket.timeout:
-                # If recv times out, just try again
-                logging.error("Connection timed out. Retrying...")
-                continue
+
+                message = json.loads(data.decode('utf-8'))
+                if message['type'] == 'map':
+                    result = handle_map_task(message['data'])
+                    result_msg = json.dumps({"type": "map_result", "data": result})
+                    sock.sendall(result_msg.encode('utf-8'))
+                elif message['type'] == 'reduce':
+                    result = handle_reduce_task(message['data'])
+                    result_msg = json.dumps({"type": "reduce_result", "data": result})
+                    sock.sendall(result_msg.encode('utf-8'))
+                elif message['type'] == 'terminate':
+                    logging.info("Received terminate command. Exiting.")
+                    break
+                else:
+                    logging.error(f"Unknown task type: {message['type']}")
+
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding JSON: {e}")
             except Exception as e:
-                logging.error(f"An error occurred while receiving data: {e}")
+                logging.error(f"Unexpected error: {e}")
                 break
 
-            message = json.loads(data.decode('utf-8'))
-
-            # Handle different types of tasks
-            logging.info(f"Received task: {message}")
-            if message['type'] == 'map':
-                result = handle_map_task(message['data'])
-                result_msg = json.dumps({"type": "map_result", "data": result})
-                s.sendall(result_msg.encode('utf-8'))
-            elif message['type'] == 'reduce':
-                result = handle_reduce_task(message['data'])
-                result_msg = json.dumps({"type": "reduce_result", "data": result})
-                s.sendall(result_msg.encode('utf-8'))
-            elif message['type'] == 'terminate':
-                logging.info("Received terminate command. Exiting.")
-                sys.exit(0)
-            else:
-                logging.error(f"Unknown task type: {message['type']}")
-                
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
     finally:
-        logging.info("Closing connection.")
-        s.close()
+        logging.info("Worker shutting down.")
+        sock.close()
 
 if __name__ == "__main__":
     if len(sys.argv) == 4:
